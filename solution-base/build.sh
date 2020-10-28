@@ -1,0 +1,205 @@
+#!/bin/bash
+set -eu
+
+PWD=$(pwd)
+BUILD_ROOT=${PWD}/_build
+ISO_ROOT=${BUILD_ROOT}/root
+IMAGES_ROOT=${ISO_ROOT}/images
+DEPLOY_ROOT=${ISO_ROOT}/operator/deploy
+
+PRODUCT_NAME=Zenko-Base
+PRODUCT_LOWERNAME=zenko-base
+BUILD_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+BUILD_HOST=$(hostname)
+
+VERSION_SHORT=$(git describe --abbrev=0)
+VERSION_FULL=${VERSION_SHORT}-dev
+GIT_REVISION=$(git describe --long --always --tags --dirty)
+ISO=${BUILD_ROOT}/${PRODUCT_LOWERNAME}-${VERSION_FULL}.iso
+
+DOCKER=docker
+DOCKER_OPTS=
+DOCKER_SOCKET=${DOCKER_SOCKET:-unix:///var/run/docker.sock}
+HARDLINK=hardlink
+SKOPEO=skopeo
+SKOPEO_OPTS="--override-os linux --insecure-policy"
+OPERATOR_TAG=$(grep /operator: deps.txt | awk -F ':' '{print $2}')
+SOLUTION_REGISTRY=metalk8s-registry-from-config.invalid/${PRODUCT_LOWERNAME}-${VERSION_FULL}
+
+ONESSL_VERSION=v0.13.1
+
+export KUBEDB_SCRIPT_LOCATION="curl -fsSL https://raw.githubusercontent.com/kubedb/installer/v0.13.0-rc.0/"
+export KUBEDB_NAMESPACE=kube-system
+export KUBEDB_SERVICE_ACCOUNT=kubedb-operator
+export KUBEDB_OPERATOR_NAME=operator
+export KUBEDB_ENABLE_RBAC=true
+export KUBEDB_RUN_ON_MASTER=0
+export KUBEDB_ENABLE_VALIDATING_WEBHOOK=false
+export KUBEDB_ENABLE_MUTATING_WEBHOOK=false
+export KUBEDB_DOCKER_REGISTRY=${SOLUTION_REGISTRY}
+export KUBEDB_OPERATOR_TAG=v0.13.0-rc.0
+export KUBEDB_IMAGE_PULL_POLICY=IfNotPresent
+export KUBEDB_ENABLE_ANALYTICS=false
+export KUBEDB_ENABLE_STATUS_SUBRESOURCE=false
+export KUBEDB_BYPASS_VALIDATING_WEBHOOK_XRAY=false
+export KUBEDB_USE_KUBEAPISERVER_FQDN_FOR_AKS=true
+export KUBEDB_PRIORITY_CLASS=system-cluster-critical
+
+# grab our dependencies from our deps.txt file as an array
+readarray -t DEP_IMAGES < deps.txt
+
+function clean()
+{
+    echo cleaning
+    rm -rf ${BUILD_ROOT}
+    rm -rf ca.crt ca.key server.crt server.key
+}
+
+function mkdirs()
+{
+    echo making dirs
+    mkdir -p ${ISO_ROOT}
+    mkdir -p ${IMAGES_ROOT}
+    mkdir -p ${DEPLOY_ROOT}
+}
+
+onessl_found() {
+    echo checking onessl
+    # https://stackoverflow.com/a/677212/244009
+    if [ -x "$(command -v onessl)" ]; then
+        onessl version --check=">=${ONESSL_VERSION}" >/dev/null 2>&1 || {
+            # old version of onessl found
+            echo "Found outdated onessl"
+            return 1
+        }
+        export ONESSL=onessl
+        return 0
+    fi
+    return 1
+}
+
+function gen_certs()
+{
+    echo generating certs
+    onessl create ca-cert
+    onessl create server-cert server --domains=kubedb-$KUBEDB_OPERATOR_NAME.$KUBEDB_NAMESPACE.svc
+    export SERVICE_SERVING_CERT_CA=$(cat ca.crt | onessl base64)
+    export TLS_SERVING_CERT=$(cat server.crt | onessl base64)
+    export TLS_SERVING_KEY=$(cat server.key | onessl base64)
+}
+
+function kubedb_yamls()
+{
+    ${KUBEDB_SCRIPT_LOCATION}deploy/operator.yaml | onessl envsubst > ${DEPLOY_ROOT}/operator.yaml
+    # ${KUBEDB_SCRIPT_LOCATION}deploy/kubedb-catalog/mongodb.yaml | onessl envsubst > deploy/crds/mongodb.yaml
+    # ${KUBEDB_SCRIPT_LOCATION}deploy/kubedb-catalog/redis.yaml | onessl envsubst > deploy/crds/redis.yaml
+    ${KUBEDB_SCRIPT_LOCATION}deploy/service-account.yaml | $ONESSL envsubst > ${DEPLOY_ROOT}/service-account.yaml
+    ${KUBEDB_SCRIPT_LOCATION}deploy/rbac-list.yaml | $ONESSL envsubst > ${DEPLOY_ROOT}/rbac-list.yaml
+    ${KUBEDB_SCRIPT_LOCATION}deploy/user-roles.yaml | $ONESSL envsubst > ${DEPLOY_ROOT}/user-roles.yaml
+    ${KUBEDB_SCRIPT_LOCATION}deploy/appcatalog-user-roles.yaml | $ONESSL envsubst > ${DEPLOY_ROOT}/appcatalog-user-roles.yaml
+
+    ${KUBEDB_SCRIPT_LOCATION}deploy/service-account.yaml | $ONESSL envsubst >> ${DEPLOY_ROOT}/operator.yaml
+    echo --- >> ${DEPLOY_ROOT}/operator.yaml
+    ${KUBEDB_SCRIPT_LOCATION}deploy/rbac-list.yaml | $ONESSL envsubst >> ${DEPLOY_ROOT}/operator.yaml
+    echo --- >> ${DEPLOY_ROOT}/operator.yaml
+    ${KUBEDB_SCRIPT_LOCATION}deploy/user-roles.yaml | $ONESSL envsubst >> ${DEPLOY_ROOT}/operator.yaml
+    echo --- >> ${DEPLOY_ROOT}/operator.yaml
+    ${KUBEDB_SCRIPT_LOCATION}deploy/appcatalog-user-roles.yaml | $ONESSL envsubst >> ${DEPLOY_ROOT}/operator.yaml
+}
+
+function gen_manifest_yaml()
+{
+    cat > ${ISO_ROOT}/manifest.yaml <<EOF
+apiVersion: solutions.metalk8s.scality.com/v1alpha1
+kind: Solution
+metadata:
+  annotations:
+    solutions.metalk8s.scality.com/display-name: ${PRODUCT_NAME}
+    solutions.metalk8s.scality.com/git: ${GIT_REVISION}
+    solutions.metalk8s.scality.com/development-release: true
+    solutions.metalk8s.scality.com/build-timestamp: ${BUILD_TIMESTAMP}
+    solutions.metalk8s.scality.com/build-host: ${BUILD_HOST}
+  name: ${PRODUCT_LOWERNAME}
+spec:
+  version: ${VERSION_FULL}
+EOF
+}
+
+function copy_yamls()
+{
+    # no yamls currently but other dependencies may require them
+    # cp -R -f operator/ ${ISO_ROOT}/operator
+}
+
+function copy_image()
+{
+    IMAGE_NAME=${1##*/}
+    FULL_PATH=${IMAGES_ROOT}/${IMAGE_NAME/:/\/}
+    mkdir -p ${FULL_PATH}
+    ${SKOPEO} ${SKOPEO_OPTS} copy \
+        --format v2s2 --dest-compress \
+        --src-daemon-host ${DOCKER_SOCKET} \
+        docker-daemon:${1} \
+        dir:${FULL_PATH}
+}
+
+function dedupe()
+{
+    ${HARDLINK} -c ${IMAGES_ROOT}
+}
+
+function build_registry_config()
+{
+    docker run \
+        --name static-oci-registry \
+        --mount type=bind,source=${ISO_ROOT}/images,destination=/var/lib/images \
+        --mount type=bind,source=${ISO_ROOT},destination=/var/run \
+        --rm \
+        docker.io/nicolast/static-container-registry:latest \
+            python3 static-container-registry.py \
+            --name-prefix '{{ repository }}' \
+            --server-root '{{ registry_root }}' \
+            --omit-constants \
+            /var/lib/images > ${ISO_ROOT}/registry-config.inc.j2
+    rm ${ISO_ROOT}/static-container-registry.conf -f
+}
+
+function build_iso()
+{
+    mkisofs -output ${ISO} \
+        -quiet \
+        -rock \
+        -joliet \
+        -joliet-long \
+        -full-iso9660-filenames \
+        -volid "${PRODUCT_NAME} ${VERSION_FULL}" \
+        --iso-level 3 \
+        -gid 0 \
+        -uid 0 \
+        -input-charset iso8859-1 \
+        -output-charset iso8859-1 \
+        ${ISO_ROOT}
+    sha256sum ${ISO} > ${ISO_ROOT}/SHA256SUM
+    echo ISO File at ${ISO}
+    echo SHA256 for ISO:
+    cat ${ISO_ROOT}/SHA256SUM
+}
+
+# run everything in order
+clean
+mkdirs
+onessl_found
+gen_certs
+kubedb_yamls
+gen_manifest_yaml
+copy_yamls
+for img in "${DEP_IMAGES[@]}"; do
+    # only pull if the image isnt already local
+    echo downloading ${img}
+    ${DOCKER} image inspect ${img} > /dev/null 2>&1 || ${DOCKER} ${DOCKER_OPTS} pull ${img}
+    copy_image ${img}
+done
+dedupe
+build_registry_config
+build_iso
+echo DONE
