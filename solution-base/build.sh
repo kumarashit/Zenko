@@ -5,7 +5,6 @@ PWD=$(pwd)
 BUILD_ROOT=${PWD}/_build
 ISO_ROOT=${BUILD_ROOT}/root
 IMAGES_ROOT=${ISO_ROOT}/images
-DEPLOY_ROOT=${ISO_ROOT}/operator/deploy
 
 PRODUCT_NAME=Zenko-Base
 PRODUCT_LOWERNAME=zenko-base
@@ -29,7 +28,7 @@ SOLUTION_REGISTRY=metalk8s-registry-from-config.invalid/${PRODUCT_LOWERNAME}-${V
 ONESSL_VERSION=v0.13.1
 
 export KUBEDB_SCRIPT_LOCATION="curl -fsSL https://raw.githubusercontent.com/kubedb/installer/v0.13.0-rc.0/"
-export KUBEDB_NAMESPACE=kube-system
+export KUBEDB_NAMESPACE=SOLUTION_ENV
 export KUBEDB_SERVICE_ACCOUNT=kubedb-operator
 export KUBEDB_OPERATOR_NAME=operator
 export KUBEDB_ENABLE_RBAC=true
@@ -60,7 +59,6 @@ function mkdirs()
     echo making dirs
     mkdir -p ${ISO_ROOT}
     mkdir -p ${IMAGES_ROOT}
-    mkdir -p ${DEPLOY_ROOT}
 }
 
 onessl_found() {
@@ -69,12 +67,13 @@ onessl_found() {
     if [ -x "$(command -v onessl)" ]; then
         onessl version --check=">=${ONESSL_VERSION}" >/dev/null 2>&1 || {
             # old version of onessl found
-            echo "Found outdated onessl"
+            echo found outdated onessl
             return 1
         }
-        export ONESSL=onessl
+        echo onessl found
         return 0
     fi
+    echo onessl not found
     return 1
 }
 
@@ -82,7 +81,7 @@ function gen_certs()
 {
     echo generating certs
     onessl create ca-cert
-    onessl create server-cert server --domains=kubedb-$KUBEDB_OPERATOR_NAME.$KUBEDB_NAMESPACE.svc
+    onessl create server-cert server --domains=kubedb-$KUBEDB_OPERATOR_NAME.svc
     export SERVICE_SERVING_CERT_CA=$(cat ca.crt | onessl base64)
     export TLS_SERVING_CERT=$(cat server.crt | onessl base64)
     export TLS_SERVING_KEY=$(cat server.key | onessl base64)
@@ -90,21 +89,24 @@ function gen_certs()
 
 function kubedb_yamls()
 {
-    ${KUBEDB_SCRIPT_LOCATION}deploy/operator.yaml | onessl envsubst > ${DEPLOY_ROOT}/operator.yaml
-    # ${KUBEDB_SCRIPT_LOCATION}deploy/kubedb-catalog/mongodb.yaml | onessl envsubst > deploy/crds/mongodb.yaml
-    # ${KUBEDB_SCRIPT_LOCATION}deploy/kubedb-catalog/redis.yaml | onessl envsubst > deploy/crds/redis.yaml
-    ${KUBEDB_SCRIPT_LOCATION}deploy/service-account.yaml | $ONESSL envsubst > ${DEPLOY_ROOT}/service-account.yaml
-    ${KUBEDB_SCRIPT_LOCATION}deploy/rbac-list.yaml | $ONESSL envsubst > ${DEPLOY_ROOT}/rbac-list.yaml
-    ${KUBEDB_SCRIPT_LOCATION}deploy/user-roles.yaml | $ONESSL envsubst > ${DEPLOY_ROOT}/user-roles.yaml
-    ${KUBEDB_SCRIPT_LOCATION}deploy/appcatalog-user-roles.yaml | $ONESSL envsubst > ${DEPLOY_ROOT}/appcatalog-user-roles.yaml
+    echo downloading kubedb yamls
+    OPERATOR_PATH=${BUILD_ROOT}/operator.yaml
 
-    ${KUBEDB_SCRIPT_LOCATION}deploy/service-account.yaml | $ONESSL envsubst >> ${DEPLOY_ROOT}/operator.yaml
-    echo --- >> ${DEPLOY_ROOT}/operator.yaml
-    ${KUBEDB_SCRIPT_LOCATION}deploy/rbac-list.yaml | $ONESSL envsubst >> ${DEPLOY_ROOT}/operator.yaml
-    echo --- >> ${DEPLOY_ROOT}/operator.yaml
-    ${KUBEDB_SCRIPT_LOCATION}deploy/user-roles.yaml | $ONESSL envsubst >> ${DEPLOY_ROOT}/operator.yaml
-    echo --- >> ${DEPLOY_ROOT}/operator.yaml
-    ${KUBEDB_SCRIPT_LOCATION}deploy/appcatalog-user-roles.yaml | $ONESSL envsubst >> ${DEPLOY_ROOT}/operator.yaml
+    yamls=(
+        operator
+        kubedb-catalog/mongodb
+        service-account
+        rbac-list
+        user-roles
+        appcatalog-user-roles
+        psp/operator
+        psp/mongodb
+    )
+
+    for y in "${yamls[@]}"; do
+        ${KUBEDB_SCRIPT_LOCATION}deploy/${y}.yaml | onessl envsubst >> ${OPERATOR_PATH}
+        echo --- >> ${OPERATOR_PATH}
+    done
 }
 
 function gen_manifest_yaml()
@@ -125,11 +127,11 @@ spec:
 EOF
 }
 
-function copy_yamls()
-{
+# function copy_yamls()
+# {
     # no yamls currently but other dependencies may require them
     # cp -R -f operator/ ${ISO_ROOT}/operator
-}
+# }
 
 function copy_image()
 {
@@ -192,7 +194,7 @@ onessl_found
 gen_certs
 kubedb_yamls
 gen_manifest_yaml
-copy_yamls
+# copy_yamls
 for img in "${DEP_IMAGES[@]}"; do
     # only pull if the image isnt already local
     echo downloading ${img}
