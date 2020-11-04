@@ -25,9 +25,10 @@ SKOPEO_OPTS="--override-os linux --insecure-policy"
 OPERATOR_TAG=$(grep /operator: deps.txt | awk -F ':' '{print $2}')
 SOLUTION_REGISTRY=metalk8s-registry-from-config.invalid/${PRODUCT_LOWERNAME}-${VERSION_FULL}
 
-ONESSL_VERSION=v0.13.1
+KUBEDB_SCRIPT_BRANCH_TAG=89fab34cf2f5d9e0bcc3c2d5b0f0599f94ff0dca
 
-export KUBEDB_SCRIPT_LOCATION="curl -fsSL https://raw.githubusercontent.com/kubedb/installer/v0.13.0-rc.0/"
+export KUBEDB_OPERATOR_TAG=${OPERATOR_TAG}
+export KUBEDB_SCRIPT_LOCATION="curl -fsSL https://raw.githubusercontent.com/kubedb/installer/${KUBEDB_SCRIPT_BRANCH_TAG}/"
 export KUBEDB_NAMESPACE=SOLUTION_ENV
 export KUBEDB_SERVICE_ACCOUNT=kubedb-operator
 export KUBEDB_OPERATOR_NAME=operator
@@ -36,7 +37,6 @@ export KUBEDB_RUN_ON_MASTER=0
 export KUBEDB_ENABLE_VALIDATING_WEBHOOK=false
 export KUBEDB_ENABLE_MUTATING_WEBHOOK=false
 export KUBEDB_DOCKER_REGISTRY=${SOLUTION_REGISTRY}
-export KUBEDB_OPERATOR_TAG=v0.13.0-rc.0
 export KUBEDB_IMAGE_PULL_POLICY=IfNotPresent
 export KUBEDB_ENABLE_ANALYTICS=false
 export KUBEDB_ENABLE_STATUS_SUBRESOURCE=false
@@ -61,39 +61,12 @@ function mkdirs()
     mkdir -p ${IMAGES_ROOT}
 }
 
-onessl_found() {
-    echo checking onessl
-    # https://stackoverflow.com/a/677212/244009
-    if [ -x "$(command -v onessl)" ]; then
-        onessl version --check=">=${ONESSL_VERSION}" >/dev/null 2>&1 || {
-            # old version of onessl found
-            echo found outdated onessl
-            return 1
-        }
-        echo onessl found
-        return 0
-    fi
-    echo onessl not found
-    return 1
-}
-
-function gen_certs()
-{
-    echo generating certs
-    onessl create ca-cert
-    onessl create server-cert server --domains=kubedb-$KUBEDB_OPERATOR_NAME.svc
-    export SERVICE_SERVING_CERT_CA=$(cat ca.crt | onessl base64)
-    export TLS_SERVING_CERT=$(cat server.crt | onessl base64)
-    export TLS_SERVING_KEY=$(cat server.key | onessl base64)
-}
-
 function kubedb_yamls()
 {
     echo downloading kubedb yamls
     OPERATOR_PATH=${BUILD_ROOT}/operator.yaml
 
     yamls=(
-        operator
         kubedb-catalog/mongodb
         service-account
         rbac-list
@@ -103,8 +76,10 @@ function kubedb_yamls()
         psp/mongodb
     )
 
+    envsubst < operator.yaml > ${OPERATOR_PATH}
+    echo --- >> ${OPERATOR_PATH}
     for y in "${yamls[@]}"; do
-        ${KUBEDB_SCRIPT_LOCATION}deploy/${y}.yaml | onessl envsubst >> ${OPERATOR_PATH}
+        ${KUBEDB_SCRIPT_LOCATION}deploy/${y}.yaml | envsubst >> ${OPERATOR_PATH}
         echo --- >> ${OPERATOR_PATH}
     done
 }
@@ -190,8 +165,6 @@ function build_iso()
 # run everything in order
 clean
 mkdirs
-onessl_found
-gen_certs
 kubedb_yamls
 gen_manifest_yaml
 # copy_yamls

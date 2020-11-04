@@ -1,0 +1,163 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubedb-${KUBEDB_OPERATOR_NAME}
+  namespace: ${KUBEDB_NAMESPACE}
+  labels:
+    app: kubedb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubedb
+  template:
+    metadata:
+      labels:
+        app: kubedb
+      annotations:
+        scheduler.alpha.kubernetes.io/critical-pod: ''
+    spec:
+      serviceAccountName: ${KUBEDB_SERVICE_ACCOUNT}
+      imagePullSecrets: [${KUBEDB_IMAGE_PULL_SECRET}]
+      containers:
+      - name: operator
+        image: ${KUBEDB_DOCKER_REGISTRY}/${KUBEDB_OPERATOR_NAME}:${KUBEDB_OPERATOR_TAG}
+        imagePullPolicy: ${KUBEDB_IMAGE_PULL_POLICY}
+        args:
+        - run
+        - --v=3
+        - --governing-service=kubedb
+        - --rbac=${KUBEDB_ENABLE_RBAC}
+        - --secure-port=8443
+        - --audit-log-path=-
+        - --tls-cert-file=/var/serving-cert/tls.crt
+        - --tls-private-key-file=/var/serving-cert/tls.key
+        - --enable-mutating-webhook=${KUBEDB_ENABLE_MUTATING_WEBHOOK}
+        - --enable-validating-webhook=${KUBEDB_ENABLE_VALIDATING_WEBHOOK}
+        - --enable-status-subresource=${KUBEDB_ENABLE_STATUS_SUBRESOURCE}
+        - --bypass-validating-webhook-xray=${KUBEDB_BYPASS_VALIDATING_WEBHOOK_XRAY}
+        - --use-kubeapiserver-fqdn-for-aks=${KUBEDB_USE_KUBEAPISERVER_FQDN_FOR_AKS}
+        - --enable-analytics=${KUBEDB_ENABLE_ANALYTICS}
+        env:
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: MY_POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        ports:
+        - containerPort: 8443
+        volumeMounts:
+        - mountPath: /var/serving-cert
+          name: serving-cert
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 15
+          timeoutSeconds: 15
+        resources:
+          requests:
+            cpu: "100m"
+      nodeSelector:
+        beta.kubernetes.io/os: linux
+        beta.kubernetes.io/arch: amd64
+      volumes:
+      - name: serving-cert
+        secret:
+          defaultMode: 420
+          secretName: kubedb-${KUBEDB_OPERATOR_NAME}-apiserver-cert
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: selfsigned-issuer
+  namespace: ${KUBEDB_NAMESPACE}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: kubedb-operator-apiserver-cert
+  namespace: ${KUBEDB_NAMESPACE}
+spec:
+  # Secret names are always required.
+  secretName: kubedb-operator-apiserver-cert
+  # TODO: How does kubedb handle cert regens?
+  duration: 2160h # 90d
+  renewBefore: 360h # 15d
+  isCA: false
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 2048
+  # At least one of a DNS Name, URI, Email Address, or IP address is required.
+  dnsNames:
+  - kubedb-operator
+  # Issuer references are always required.
+  issuerRef:
+    name: selfsigned-issuer
+    # We can reference ClusterIssuers by changing the kind here.
+    # The default value is Issuer (i.e. a locally namespaced Issuer)
+    kind: Issuer
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubedb-${KUBEDB_OPERATOR_NAME}
+  namespace: ${KUBEDB_NAMESPACE}
+  labels:
+    app: kubedb
+spec:
+  ports:
+  - name: api
+    port: 443
+    targetPort: 8443
+  selector:
+    app: kubedb
+---
+# register as aggregated apiserver
+apiVersion: apiregistration.k8s.io/v1beta1
+kind: APIService
+metadata:
+  name: v1alpha1.validators.kubedb.com
+  labels:
+    app: kubedb
+  annotations:
+    cert-manager.io/inject-ca-from: ${KUBEDB_NAMESPACE}/kubedb-operator-apiserver-cert
+spec:
+  group: validators.kubedb.com
+  groupPriorityMinimum: 1000
+  versionPriority: 15
+  service:
+    name: kubedb-${KUBEDB_OPERATOR_NAME}
+    namespace: ${KUBEDB_NAMESPACE}
+  version: v1alpha1
+---
+# register as aggregated apiserver
+apiVersion: apiregistration.k8s.io/v1beta1
+kind: APIService
+metadata:
+  name: v1alpha1.mutators.kubedb.com
+  labels:
+    app: kubedb
+  annotations:
+    cert-manager.io/inject-ca-from: ${KUBEDB_NAMESPACE}/kubedb-operator-apiserver-cert
+spec:
+  group: mutators.kubedb.com
+  groupPriorityMinimum: 1000
+  versionPriority: 15
+  service:
+    name: kubedb-${KUBEDB_OPERATOR_NAME}
+    namespace: ${KUBEDB_NAMESPACE}
+  version: v1alpha1
