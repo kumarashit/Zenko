@@ -103,6 +103,7 @@ spec:
   # At least one of a DNS Name, URI, Email Address, or IP address is required.
   dnsNames:
   - kubedb-operator
+  - kubedb-${KUBEDB_OPERATOR_NAME}.${KUBEDB_NAMESPACE}.svc
   # Issuer references are always required.
   issuerRef:
     name: selfsigned-issuer
