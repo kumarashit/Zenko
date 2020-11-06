@@ -67,13 +67,15 @@ function kubedb_yamls()
     OPERATOR_PATH=${BUILD_ROOT}/operator.yaml
 
     yamls=(
-        kubedb-catalog/mongodb
         service-account
         rbac-list
         user-roles
         appcatalog-user-roles
         psp/operator
         psp/mongodb
+        psp/redis
+        kubedb-catalog/mongodb
+        kubedb-catalog/redis
     )
 
     envsubst < operator.yaml > ${OPERATOR_PATH}
